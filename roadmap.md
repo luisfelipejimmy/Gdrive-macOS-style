@@ -53,11 +53,12 @@ The extension depends on Drive's internal HTML, which Google changes without not
   Done: in Computers the columns read the `div[role="gridcell"][data-id]` cards; each computer opens as a folder. When opening a computer folder by URL, the path starts at the "Computers" column (breadcrumb with `data-view="…computers…"`). Tested: list, opening the computer, context menu and full path to `Documents`.
 - [ ] Keys that modify files: Delete/⌘⌫ (trash), ⌘C/⌘X/⌘V. Test with throwaway files.
   (Drive's menu shows "Make a copy: ⌘C, then ⌘V" and has no cut; in the test with simulated keys, ⌘X → ⌘V moved nothing.)
-- [ ] **Path when opening by URL (design decision):** when loading the page directly into a subfolder, only that folder's column appears,
+- [x] **Path when opening by URL (design decision):** when loading the page directly into a subfolder, only that folder's column appears,
   without its ancestors. This matches Finder (jumping straight to a folder shows just that column), so it is not a bug.
   Toggling the columns off and on builds the full path. Seen on 2026-11-02 during the tests for item 2.
-  Still to check: it was *intermittent* (sometimes the ancestors did show up), which would be an inconsistency worth understanding.
-  Possible optional enhancement: always build the full path when opening by URL, going beyond what Finder does.
+
+  Done (#5): the result was *intermittent* because `build()` waited a fixed `sleep(150)` and read the breadcrumb once, so it depended on how fast Drive rendered the header. Now there is a setting (`gdfPathMode` in `storage.sync`, button next to Columns): *Folder* (default) shows only the current folder when the page is loaded by URL; *Path* waits (`waitCrumbs`, 5 s timeout) for a stable breadcrumb and also walks up through folders hidden behind "…" (`expandCrumbs`). Turning Columns on and navigating inside Drive still build the path from the breadcrumb, as before. 
+  Tested: page reloads by URL in both modes (Folder and Path) at 4x CPU throttling; turning Columns on and navigating inside Drive builds the full path in Folder mode; Computers; abbreviated breadcrumb ("…"); folder opened from Shared with me (`rootId` stays unset); drag and drop.
 
 ## 6. Distribution
 
