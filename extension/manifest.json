@@ -5,6 +5,7 @@
   "version": "2.1.1",
   "description": "Adiciona ao Google Drive uma visualização em colunas no estilo do Finder, com pré-visualização e informações do arquivo.",
   "permissions": ["storage"],
+  "options_ui": { "page": "options.html", "open_in_tab": false },
   "content_scripts": [
     {
       "matches": ["https://drive.google.com/*"],

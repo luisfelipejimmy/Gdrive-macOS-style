@@ -49,7 +49,7 @@
     recSeq: 0,
     userTouched: false,
     colW: DEFAULT_COL_W,
-    pathMode: 'folder', // 'folder' | 'path'
+    pathMode: 'folder', // 'folder' | 'full' (página de opções da extensão)
     cache: new Map(), // chave da pasta -> itens
     typeBuf: '',
     typeT: 0,
@@ -297,6 +297,7 @@
     // "Computadores" só faz sentido como raiz do caminho.
     return crumbs.filter((c, i) => c.id || i === 0);
   }
+
   // ================================================================ sincronização com a lista nativa
 
   function natCheckKey() {
@@ -696,7 +697,7 @@
     c.error = false;
     if (complete) c.complete = true;
     const ci = S.cols.indexOf(c);
-    if (c.complete && !c.chain) {
+    if (c.complete) {
       let lost = false;
       for (const id of [...c.sel]) {
         if (!c.byId.has(id)) {
@@ -751,49 +752,48 @@
     // Modo "só a pasta" (padrão, como o Finder): na carga por URL, mostra apenas a coluna da pasta atual.
     if (initial && S.pathMode !== 'full') return;
     // Caminho completo: as pastas ancestrais vêm do breadcrumb do cabeçalho.
+    const quit = () => stale() || S.userTouched;
     let crumbs = await waitCrumbs(stale);
-    if (!crumbs.length || stale() || S.userTouched) return;
-    crumbs = await expandCrumbs(crumbs, stale);
-    if (stale() || S.userTouched) return;
-    const ids = [...crumbs.map((c) => c.id), key.split('/').pop()];
-    const anc = crumbs.map((cr, i) => {
-      const c = makeCol(cr.key, cr.name, { chain: true });
-      c.sel.add(ids[i + 1]);
-      c.cursor = c.anchor = ids[i + 1];
-      if (!c.items) c.lazy = true;
-      return c;
-    });
-    S.cols = [...anc, col0];
-    S.active = S.cols.length - 1;
-    renderAll();
-    scrollToEnd(false);
-    const done = () => {
-      for (const c of anc) c.chain = false;
-    };
-    for (let i = 0; i < anc.length; i++) {
-      if (stale() || S.userTouched) return done();
-      const c = anc[i];
-      if (!S.cols.includes(c)) continue;
-      c.lazy = false;
-      fillCol(c);
-      if (!(await ensureNative(c.key, () => stale() || S.userTouched))) continue;
-      // Espera o item da próxima coluna aparecer (pode estar além da primeira página).
-      await waitFor(() => stale() || S.userTouched || c.complete || (c.byId && c.byId.has(ids[i + 1])), 8000);
-      if (stale() || S.userTouched) return done();
-      if (!c.byId.has(ids[i + 1])) {
-        // Breadcrumb abreviado ("…"): o caminho não é contínuo; descarta as colunas até aqui.
-        const cut = S.cols.indexOf(c) + 1;
-        for (const k of S.cols.slice(0, cut)) k.el && k.el.remove();
-        S.cols = S.cols.slice(cut);
-        S.active = S.cols.length - 1;
-        renderAll();
-        continue;
-      }
-      paintSel(c);
-      scrollRowIntoView(c, c.cursor);
+    if (!crumbs.length || quit()) return;
+    const note = busyNote('Montando o caminho…');
+    try {
+      crumbs = await expandCrumbs(crumbs, stale);
+      if (quit()) return;
+      const ids = [...crumbs.map((c) => c.id), key.split('/').pop()];
+      // Carrega antes as pastas que faltam e mostra o caminho inteiro de uma vez, em vez de coluna por coluna.
+      await preloadChain(crumbs, ids, quit);
+      if (quit()) return;
+      let anc = crumbs.map((cr, i) => {
+        const c = makeCol(cr.key, cr.name);
+        c.sel.add(ids[i + 1]);
+        c.cursor = c.anchor = ids[i + 1];
+        if (!c.items) c.lazy = true;
+        return c;
+      });
+      // Caminho não contínuo (a pasta não contém a seguinte): descarta as colunas até ela.
+      const cut = anc.reduce((n, c, i) => (c.items && !c.byId.has(ids[i + 1]) ? i + 1 : n), 0);
+      anc = anc.slice(cut);
+      S.cols = [...anc, col0];
+      S.active = S.cols.length - 1;
+      renderAll();
+      scrollToEnd(false);
+      for (const c of anc) scrollRowIntoView(c, c.cursor);
+    } finally {
+      note.remove();
     }
-    done();
-    if (!stale() && !S.userTouched) await ensureNative(key, () => stale() || S.userTouched);
+    if (!quit()) await ensureNative(key, quit);
+  }
+
+  // Abre na lista nativa cada pasta do caminho cujo conteúdo ainda não está no cache (a subida do
+  // expandCrumbs já deixa várias carregadas) e espera aparecer a pasta seguinte do caminho.
+  async function preloadChain(crumbs, ids, quit) {
+    for (let i = 0; i < crumbs.length && !quit(); i++) {
+      const k = crumbs[i].key;
+      const has = () => (S.cache.get(k) || []).some((it) => it.id === ids[i + 1]);
+      if (has()) continue;
+      if (!(await ensureNative(k, quit))) continue;
+      await waitFor(() => quit() || has() || (S.nat.key === k && S.nat.complete), 8000);
+    }
   }
 
   // ================================================================ seleção e navegação
@@ -1785,45 +1785,9 @@
     paintToggle();
   }
 
-  function setPathMode(v) {
-    S.pathMode = v === 'full' ? 'full' : 'folder';
-    storageSet({ gdfPathMode: S.pathMode });
-    paintPathMode();
-  }
-
-  function paintPathMode() {
-    const b = document.querySelector('.gdf-pathmode');
-    if (!b) return;
-    const full = S.pathMode === 'full';
-    b.hidden = !S.enabled;
-    b.textContent = full ? 'Caminho' : 'Pasta';
-    b.setAttribute('aria-pressed', String(full));
-    b.title = full
-      ? 'Ao abrir uma pasta por URL: mostra o caminho completo (clique para mostrar só a pasta)'
-      : 'Ao abrir uma pasta por URL: mostra só a pasta (clique para mostrar o caminho completo)';
-  }
-
-  function injectPathMode(group) {
-    if (document.querySelector('.gdf-pathmode')) return;
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'gdf-pathmode';
-    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'keydown', 'focus']) {
-      b.addEventListener(t, (e) => e.stopPropagation());
-    }
-    b.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setPathMode(S.pathMode === 'full' ? 'folder' : 'full');
-    });
-    group.after(b);
-  }
-
   function paintToggle() {
     const mine = document.querySelector('.gdf-toggle');
     if (!mine) return;
-    injectPathMode(mine.parentElement);
-    paintPathMode();
     const natives = [...mine.parentElement.querySelectorAll(':scope > button[role="radio"]:not(.gdf-toggle)')];
     if (isShowing()) {
       for (const n of natives) {
@@ -2234,4 +2198,13 @@
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
       else start();
     });
-  })();
+
+  // A opção Pasta/Caminho fica na página de opções da extensão (options.html).
+  try {
+    EXT?.storage?.onChanged?.addListener((ch, area) => {
+      if (area === 'sync' && ch.gdfPathMode) S.pathMode = ch.gdfPathMode.newValue === 'full' ? 'full' : 'folder';
+    });
+  } catch {
+    /* contexto da extensão invalidado */
+  }
+})();
