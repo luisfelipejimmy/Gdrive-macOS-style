@@ -19,7 +19,7 @@
   const DEFAULT_COL_W = 260;
   const MIN_COL_W = 160;
   const MAX_COL_W = 640;
-  const FOLDER_RE = /^(pasta|folder|carpeta|dossier|ordner|cartella|drive compartilhado|shared drive|unidade compartilhada|computador|computer|ordenador|ordinateur)\b/i;
+  const FOLDER_RE = /^(pasta|folder|shared folder|carpeta|dossier|ordner|freigegebener ordner|cartella|drive compartilhado|shared drive|unidade compartilhada|computador|computer|ordenador|ordinateur)\b/i;
   const SHORTCUT_RE = /\b(atalho|shortcut|acceso directo|raccourci|verknüpfung|scorciatoia)\b/i;
   const SHARED_RE = /\s+(compartilhad[oa]|shared|compartido|partagé|freigegeben|condiviso)$/i;
   const SUPPORTED_RE = /^\/drive\/(my-drive|folders\/[\w-]+|shared-with-me|recent|starred|trash|shared-drives|computers|search)\b/;
@@ -39,6 +39,7 @@
     enabled: false,
     key: null, // chave da rota atual (/drive/...)
     needsBuild: true,
+    initialBuild: false, // a próxima construção é a da carga da página por URL (só ela usa pathMode)
     lastHref: '',
     expectKey: null, // navegação iniciada pela extensão
     cols: [],
@@ -48,6 +49,7 @@
     recSeq: 0,
     userTouched: false,
     colW: DEFAULT_COL_W,
+    pathMode: 'folder', // 'folder' | 'path'
     cache: new Map(), // chave da pasta -> itens
     typeBuf: '',
     typeT: 0,
@@ -295,7 +297,6 @@
     // "Computadores" só faz sentido como raiz do caminho.
     return crumbs.filter((c, i) => c.id || i === 0);
   }
-
   // ================================================================ sincronização com a lista nativa
 
   function natCheckKey() {
@@ -431,6 +432,45 @@
       await sleep(40);
     }
     return null;
+  }
+
+  // Espera o breadcrumb do cabeçalho aparecer e ficar estável (mesmo resultado em leituras seguidas).
+  // Devolve [] se estourar o tempo, ficar obsoleto ou o usuário mexer nas colunas.
+  async function waitCrumbs(isStale, ms = 5000) {
+    let prev = '';
+    let same = 0;
+    const found = await waitFor(() => {
+      if (isStale() || S.userTouched) return [];
+      const cr = scrapeCrumbs();
+      const sig = cr.map((c) => c.id || 'computers').join('/');
+      same = cr.length && sig === prev ? same + 1 : 0;
+      prev = sig;
+      return same >= 2 ? cr : null;
+    }, ms);
+    return found || [];
+  }
+
+  // Breadcrumb abreviado ("…"): sobe uma pasta por vez e lê o breadcrumb de novo, até chegar à raiz.
+  // Cada passo revela as pastas que ficavam escondidas atrás do "…".
+  async function expandCrumbs(crumbs, isStale) {
+    let all = crumbs;
+    const quit = () => isStale() || S.userTouched;
+    for (let n = 0; n < 30 && !quit(); n++) {
+      const first = all[0];
+      if (!first?.id || (S.rootId && first.id === S.rootId)) break;
+      if (!(await ensureNative(first.key, quit))) break;
+      const up = await waitCrumbs(isStale, 2000);
+      const seen = new Set(all.map((c) => c.id || 'computers'));
+      const fresh = up.filter((c) => !seen.has(c.id || 'computers'));
+      if (!fresh.length) {
+        // Nada acima de "first". Em "Compartilhados comigo" e em Drives compartilhados isso também
+        // acontece, então só guarda como raiz quando o Drive abriu mesmo o Meu Drive.
+        if (!S.rootId && !quit() && curKey() === '/drive/my-drive') S.rootId = first.id;
+        break;
+      }
+      all = [...fresh, ...all];
+    }
+    return all;
   }
 
   function ensureListLayout(main, grid) {
@@ -701,12 +741,20 @@
     S.nativeDirty = true;
     renderAll();
     await waitSettled(key, stale);
-    if (stale() || !isFolderKey(key) || key === '/drive/my-drive') return;
+    if (stale()) return;
+    // Só a primeira construção (carga da página por URL) segue a preferência Pasta/Caminho.
+    // Depois, ao ligar as colunas ou navegar dentro do Drive, o caminho completo é sempre montado.
+    const initial = S.initialBuild;
+    S.initialBuild = false;
+    if (!isFolderKey(key) || key === '/drive/my-drive') return;
 
+    // Modo "só a pasta" (padrão, como o Finder): na carga por URL, mostra apenas a coluna da pasta atual.
+    if (initial && S.pathMode !== 'full') return;
     // Caminho completo: as pastas ancestrais vêm do breadcrumb do cabeçalho.
-    await sleep(150);
-    const crumbs = scrapeCrumbs();
+    let crumbs = await waitCrumbs(stale);
     if (!crumbs.length || stale() || S.userTouched) return;
+    crumbs = await expandCrumbs(crumbs, stale);
+    if (stale() || S.userTouched) return;
     const ids = [...crumbs.map((c) => c.id), key.split('/').pop()];
     const anc = crumbs.map((cr, i) => {
       const c = makeCol(cr.key, cr.name, { chain: true });
@@ -1737,9 +1785,45 @@
     paintToggle();
   }
 
+  function setPathMode(v) {
+    S.pathMode = v === 'full' ? 'full' : 'folder';
+    storageSet({ gdfPathMode: S.pathMode });
+    paintPathMode();
+  }
+
+  function paintPathMode() {
+    const b = document.querySelector('.gdf-pathmode');
+    if (!b) return;
+    const full = S.pathMode === 'full';
+    b.hidden = !S.enabled;
+    b.textContent = full ? 'Caminho' : 'Pasta';
+    b.setAttribute('aria-pressed', String(full));
+    b.title = full
+      ? 'Ao abrir uma pasta por URL: mostra o caminho completo (clique para mostrar só a pasta)'
+      : 'Ao abrir uma pasta por URL: mostra só a pasta (clique para mostrar o caminho completo)';
+  }
+
+  function injectPathMode(group) {
+    if (document.querySelector('.gdf-pathmode')) return;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'gdf-pathmode';
+    for (const t of ['mousedown', 'mouseup', 'pointerdown', 'pointerup', 'keydown', 'focus']) {
+      b.addEventListener(t, (e) => e.stopPropagation());
+    }
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setPathMode(S.pathMode === 'full' ? 'folder' : 'full');
+    });
+    group.after(b);
+  }
+
   function paintToggle() {
     const mine = document.querySelector('.gdf-toggle');
     if (!mine) return;
+    injectPathMode(mine.parentElement);
+    paintPathMode();
     const natives = [...mine.parentElement.querySelectorAll(':scope > button[role="radio"]:not(.gdf-toggle)')];
     if (isShowing()) {
       for (const n of natives) {
@@ -1783,6 +1867,7 @@
     if (v) {
       S.wantFocus = true;
       S.needsBuild = true;
+      S.initialBuild = false; // ligar pelo botão não é carga por URL: monta o caminho completo
     } else {
       ++S.recSeq;
       ++S.buildSeq;
@@ -2139,12 +2224,14 @@
   if (WANT_TEST) maybeTestFromHash();
 
   Promise.resolve()
-    .then(() => (EXT ? EXT.storage.sync.get(['gdfEnabled', 'gdfColW']) : {}))
+    .then(() => (EXT ? EXT.storage.sync.get(['gdfEnabled', 'gdfColW', 'gdfPathMode']) : {}))
     .catch(() => ({}))
     .then((v) => {
       S.enabled = !!(v && v.gdfEnabled);
+      S.initialBuild = S.enabled; // colunas já ligadas na carga: esta primeira construção usa pathMode
+      S.pathMode = v?.gdfPathMode === 'full' ? 'full' : 'folder';
       S.colW = Math.max(MIN_COL_W, Math.min(MAX_COL_W, Number(v && v.gdfColW) || DEFAULT_COL_W));
       if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
       else start();
     });
-})();
+  })();

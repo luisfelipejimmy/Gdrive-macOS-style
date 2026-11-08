@@ -24,7 +24,7 @@ Open Drive and click the **Columns** button next to List/Grid.
 - Column navigation with mouse and keyboard; resizable columns (⌥ = all of them)
 - Preview (real thumbnail) + file info
 - Drive's **native** selection bar, context menu, dialogs and viewer
-- Opening a deep folder from its URL builds the full path from the breadcrumb
+- **Opening a folder from its URL**: a **Folder / Path** button next to Columns (saved in `storage.sync`). *Folder* (default, like Finder) shows only that folder's column; *Path* builds the full path, including folders hidden behind "…" in the breadcrumb. Either mode gives the same result on every page load. Turning Columns on and navigating inside Drive always build the path from the breadcrumb. *Path* is slower on deep folders: it walks up the hidden folders and back down (about half a second per level)
 - Large folders are loaded in full automatically (Drive pages them 50 at a time)
 - **Drag and drop**: move items between columns and upload files dragged from your computer (details below)
 - Works in: My Drive, folders, Shared with me, Recent, Starred, Trash, Shared drives, Computers and search
